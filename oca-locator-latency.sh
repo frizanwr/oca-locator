@@ -1,0 +1,66 @@
+#!/bin/bash
+
+# Identitas
+UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+TOKEN_CACHE="/tmp/netflix_token_cache.txt"
+
+# --- FUNGSI AMBIL TOKEN ---
+fetch_new_token() {
+    local JS_FILE=$(curl -s -L -H "User-Agent: $UA" https://fast.com/ | grep -oE "app-[a-z0-9]+\.js" | head -n 1)
+    if [ -z "$JS_FILE" ]; then return 1; fi
+    local NEW_TOKEN=$(curl -s -L -H "User-Agent: $UA" -H "Referer: https://fast.com/" \
+              "https://fast.com/$JS_FILE" | tr '}' '\n' | grep -m 1 -oE 'token:"[a-zA-Z0-9]{32}"' | cut -d'"' -f2)
+    [ -z "$NEW_TOKEN" ] && return 1
+    echo "$NEW_TOKEN" > "$TOKEN_CACHE"
+    echo "$NEW_TOKEN"
+}
+
+# --- LOGIKA TOKEN ---
+if [ -f "$TOKEN_CACHE" ]; then
+    TOKEN=$(cat "$TOKEN_CACHE")
+else
+    TOKEN=$(fetch_new_token)
+fi
+
+# --- AMBIL DATA ---
+RESPONSE=$(curl -s -H "User-Agent: $UA" -H "Origin: https://fast.com" -H "Referer: https://fast.com/" \
+               "https://api.fast.com/netflix/speedtest?https=true&token=$TOKEN&urlCount=5")
+
+if echo "$RESPONSE" | grep -q "Unknown app token"; then
+    rm "$TOKEN_CACHE"
+    TOKEN=$(fetch_new_token)
+    RESPONSE=$(curl -s -H "User-Agent: $UA" "https://api.fast.com/netflix/speedtest?https=true&token=$TOKEN&urlCount=5")
+fi
+
+# --- HEADER TABEL (Dilebarkan ke 130 karakter) ---
+echo -e "\n\e[1m=== NETFLIX OPEN CONNECT APPLIANCE (OCA) LOCATOR ===\e[0m"
+echo "------------------------------------------------------------------------------------------------------------------------------"
+printf "\e[1m%-50s | %-15s | %-10s | %-40s\e[0m\n" "HOSTNAME OCA" "IP ADDRESS" "LATENCY" "OWNER/ISP"
+echo "------------------------------------------------------------------------------------------------------------------------------"
+
+# --- PROSES BARIS PER BARIS ---
+URLS=$(echo "$RESPONSE" | python3 -c "import sys, json; [print(x['url']) for x in json.load(sys.stdin)]")
+
+for URL in $URLS; do
+    HOST=$(echo "$URL" | sed -e 's|https://||' -e 's|/.*||')
+    IP=$(getent hosts "$HOST" | awk '{print $1}' | head -n 1)
+    
+    if [ -z "$IP" ]; then
+        IP="No Resolve"
+        LATENCY="-"
+        OWNER="-"
+    else
+        # 1. Cek Latency (Ping 3x)
+        LAT_VAL=$(ping -c 3 -W 1 "$IP" 2>/dev/null | tail -1 | awk -F '/' '{print $5}')
+        [ -z "$LAT_VAL" ] && LATENCY="Timeout" || LATENCY="${LAT_VAL}ms"
+
+        # 2. Owner/ISP (Dilebarkan ke 40 karakter)
+        OWNER=$(whois "$IP" | grep -iE "^descr:|^Organization:|^OrgName:|^as-name:" | head -n 1 | cut -d':' -f2 | sed 's/^[ \t]*//' | cut -c1-40)
+        [ -z "$OWNER" ] && OWNER="Netflix Streaming"
+    fi
+
+    # Menampilkan hasil dengan warna
+    printf "\e[36m%-50s\e[0m | \e[32m%-15s\e[0m | \e[33m%-10s\e[0m | %-40s\n" "$HOST" "$IP" "$LATENCY" "$OWNER"
+done
+echo "------------------------------------------------------------------------------------------------------------------------------"
+echo -e "Status: \e[92mSuccess\e[0m | Source: \e[94mFast.com API\e[0m\n"
